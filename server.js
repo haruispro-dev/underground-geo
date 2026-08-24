@@ -184,7 +184,7 @@ app.get("/api/releases/:slug",(req,res)=>{
   res.json(r);
 });
 app.get("/api/videos",(req,res)=>res.json(rows("SELECT * FROM videos WHERE published=1 ORDER BY featured DESC,release_date DESC")));
-app.get("/api/awards",(req,res)=>res.json(rows("SELECT * FROM awards WHERE published=1 ORDER BY year DESC, id DESC"));
+app.get("/api/awards",(req,res)=>res.json(rows("SELECT * FROM awards WHERE published=1 ORDER BY year DESC, id DESC")));
 
 app.get("/api/admin/dashboard",auth,(req,res)=>{
   res.json({
