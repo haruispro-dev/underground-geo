@@ -23,6 +23,9 @@ db.pragma("journal_mode = WAL");
 try { db.exec("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'artist'"); } catch {}
 try { db.exec("ALTER TABLE artists ADD COLUMN type TEXT DEFAULT 'artist'"); } catch {}
+try { db.exec("ALTER TABLE releases ADD COLUMN user_id INTEGER"); } catch {}
+try { db.exec("ALTER TABLE videos ADD COLUMN user_id INTEGER"); } catch {}
+
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS admins (
@@ -95,6 +98,39 @@ CREATE TABLE IF NOT EXISTS awards (
  published INTEGER DEFAULT 1,
  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS beats (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ title TEXT NOT NULL,
+ slug TEXT UNIQUE NOT NULL,
+ producer TEXT NOT NULL,
+ user_id INTEGER,
+ audio_url TEXT DEFAULT '',
+ cover TEXT DEFAULT '',
+ description TEXT DEFAULT '',
+ genre TEXT DEFAULT '',
+ bpm TEXT DEFAULT '',
+ links TEXT DEFAULT '{}',
+ featured INTEGER DEFAULT 0,
+ published INTEGER DEFAULT 1,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS comments (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ content_type TEXT NOT NULL,
+ content_id INTEGER NOT NULL,
+ user_id INTEGER NOT NULL,
+ body TEXT NOT NULL,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS reactions (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ content_type TEXT NOT NULL,
+ content_id INTEGER NOT NULL,
+ user_id INTEGER NOT NULL,
+ kind TEXT NOT NULL DEFAULT 'like',
+ UNIQUE(content_type,content_id,user_id,kind)
+);
+
 CREATE TABLE IF NOT EXISTS home_sections (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  type TEXT NOT NULL,
@@ -130,11 +166,22 @@ if (db.prepare("SELECT COUNT(*) c FROM home_sections").get().c === 0) {
   ["registered_artists","Registered Artists",1,3,{}],
   ["featured_producers","Featured Producers",1,4,{}],
   ["registered_producers","Registered Producers",1,5,{}],
-  ["videos","Music Videos",1,6,{}],
-  ["awards","Awards",1,7,{}]
+  ["beats","Latest Beats",1,6,{}],
+  ["videos","Music Videos",1,7,{}],
+  ["awards","Awards",1,8,{}],
+  ["discord","Join the Underground GEO Discord",1,9,{"url":"https://discord.gg/ZymubBftQN"}]
  ];
  const stmt=db.prepare("INSERT INTO home_sections(type,title,enabled,position,config) VALUES(?,?,?,?,?)");
  sections.forEach(x=>stmt.run(x[0],x[1],x[2],x[3],JSON.stringify(x[4])));
+}
+// Add newly introduced sections to existing installations without disturbing the admin's current ordering.
+const requiredHomeSections=[
+ ["beats","Latest Beats",1,6,{}],
+ ["discord","Join the Underground GEO Discord",1,9,{"url":"https://discord.gg/ZymubBftQN"}]
+];
+for(const [type,title,enabled,position,config] of requiredHomeSections){
+ if(!row("SELECT id FROM home_sections WHERE type=?",[type]))
+   db.prepare("INSERT INTO home_sections(type,title,enabled,position,config) VALUES(?,?,?,?,?)").run(type,title,enabled,position,JSON.stringify(config));
 }
 
 app.use(express.json({limit:"5mb"}));
@@ -182,6 +229,12 @@ function rows(sql,params=[]){return db.prepare(sql).all(...params)}
 function row(sql,params=[]){return db.prepare(sql).get(...params)}
 function adminAuth(req,res,next){if(!req.session?.adminId)return res.status(401).json({error:"Unauthorized"});next()}
 function userAuth(req,res,next){if(!req.session?.userId)return res.status(401).json({error:"Login required"});next()}
+function contentExists(type,id){
+ if(type==="release") return !!row("SELECT id FROM releases WHERE id=? AND published=1",[id]);
+ if(type==="beat") return !!row("SELECT id FROM beats WHERE id=? AND published=1",[id]);
+ return false;
+}
+
 
 app.post("/api/auth/login",(req,res)=>{
  const {email,password}=req.body;
@@ -253,6 +306,7 @@ app.get("/api/home",(req,res)=>{
   featuredProducers:rows("SELECT * FROM artists WHERE published=1 AND type='producer' AND featured=1 ORDER BY created_at DESC"),
   registeredProducers:rows("SELECT * FROM artists WHERE published=1 AND type='producer' AND user_id IS NOT NULL ORDER BY created_at DESC"),
   releases:rows("SELECT * FROM releases WHERE published=1 ORDER BY featured DESC,release_date DESC,created_at DESC"),
+  beats:rows("SELECT * FROM beats WHERE published=1 ORDER BY featured DESC,created_at DESC"),
   videos:rows("SELECT * FROM videos WHERE published=1 ORDER BY featured DESC,release_date DESC,created_at DESC"),
   awards:rows("SELECT * FROM awards WHERE published=1 ORDER BY featured DESC,year DESC,id DESC")
  };
@@ -269,7 +323,35 @@ app.get("/api/releases/:slug",(req,res)=>{
  const r=row("SELECT * FROM releases WHERE slug=? AND published=1",[req.params.slug]);
  if(!r)return res.status(404).json({error:"Not found"});res.json(r);
 });
-app.get("/api/videos",(req,res)=>res.json(rows("SELECT * FROM videos WHERE published=1 ORDER BY featured DESC,release_date DESC")));
+app.get("/api/videos",(req,res)=>res.json(rows("SELECT * FROM videos WHERE published=1 ORDER BY featured DESC,release_date DESC")));app.get("/api/beats",(req,res)=>res.json(rows("SELECT * FROM beats WHERE published=1 ORDER BY featured DESC,created_at DESC")));
+app.get("/api/beats/:slug",(req,res)=>{const b=row("SELECT * FROM beats WHERE slug=? AND published=1",[req.params.slug]);if(!b)return res.status(404).json({error:"Not found"});res.json(b);});
+app.get("/api/content/:type/:id/comments",(req,res)=>{
+ const type=String(req.params.type),id=Number(req.params.id);
+ if(!["release","beat"].includes(type)||!Number.isInteger(id))return res.status(400).json({error:"Invalid content"});
+ res.json(rows("SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.content_type=? AND c.content_id=? ORDER BY c.created_at ASC,c.id ASC",[type,id]));
+});
+app.get("/api/content/:type/:id/reactions",(req,res)=>{
+ const type=String(req.params.type),id=Number(req.params.id);
+ if(!["release","beat"].includes(type)||!Number.isInteger(id))return res.status(400).json({error:"Invalid content"});
+ const count=row("SELECT COUNT(*) c FROM reactions WHERE content_type=? AND content_id=? AND kind='like'",[type,id]).c;
+ const reacted=!!(req.session?.userId&&row("SELECT id FROM reactions WHERE content_type=? AND content_id=? AND user_id=? AND kind='like'",[type,id,req.session.userId]));
+ res.json({count,reacted});
+});
+app.post("/api/content/:type/:id/reaction",userAuth,(req,res)=>{
+ const type=String(req.params.type),id=Number(req.params.id);
+ if(!["release","beat"].includes(type)||!contentExists(type,id))return res.status(404).json({error:"Content not found"});
+ const ex=row("SELECT id FROM reactions WHERE content_type=? AND content_id=? AND user_id=? AND kind='like'",[type,id,req.session.userId]);
+ if(ex)db.prepare("DELETE FROM reactions WHERE id=?").run(ex.id);else db.prepare("INSERT INTO reactions(content_type,content_id,user_id,kind) VALUES(?,?,?,'like')").run(type,id,req.session.userId);
+ res.json({reacted:!ex,count:row("SELECT COUNT(*) c FROM reactions WHERE content_type=? AND content_id=? AND kind='like'",[type,id]).c});
+});
+app.post("/api/content/:type/:id/comments",userAuth,(req,res)=>{
+ const type=String(req.params.type),id=Number(req.params.id),body=String(req.body.body||"").trim();
+ if(!["release","beat"].includes(type)||!contentExists(type,id))return res.status(404).json({error:"Content not found"});
+ if(body.length<1||body.length>500)return res.status(400).json({error:"Comment must be 1-500 characters"});
+ const info=db.prepare("INSERT INTO comments(content_type,content_id,user_id,body) VALUES(?,?,?,?)").run(type,id,req.session.userId,body);
+ res.json(row("SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?",[info.lastInsertRowid]));
+});
+
 app.get("/api/awards",(req,res)=>res.json(rows("SELECT * FROM awards WHERE published=1 ORDER BY year DESC,id DESC")));
 
 app.get("/api/admin/dashboard",adminAuth,(req,res)=>res.json({
@@ -277,6 +359,7 @@ app.get("/api/admin/dashboard",adminAuth,(req,res)=>res.json({
  releases:row("SELECT COUNT(*) c FROM releases").c,
  videos:row("SELECT COUNT(*) c FROM videos").c,
  awards:row("SELECT COUNT(*) c FROM awards").c,
+ beats:row("SELECT COUNT(*) c FROM beats").c,
  pending:row("SELECT COUNT(*) c FROM users WHERE approved=0").c
 }));
 
@@ -300,11 +383,41 @@ app.put("/api/admin/users/:id",adminAuth,(req,res)=>{
  res.json({ok:true});
 });
 
+app.get("/api/user/posts",userAuth,(req,res)=>{
+ res.json({
+  releases:rows("SELECT id,title,slug,artist,cover,release_date,genre,published FROM releases WHERE user_id=? ORDER BY id DESC",[req.session.userId]),
+  beats:rows("SELECT id,title,slug,producer,cover,audio_url,genre,bpm,published FROM beats WHERE user_id=? ORDER BY id DESC",[req.session.userId]),
+  videos:rows("SELECT id,title,artist,thumbnail,url,release_date,published FROM videos WHERE user_id=? ORDER BY id DESC",[req.session.userId])
+ });
+});
+app.post("/api/user/releases",userAuth,(req,res)=>{
+ const u=row("SELECT * FROM users WHERE id=?",[req.session.userId]),title=String(req.body.title||"").trim();
+ if(title.length<2)return res.status(400).json({error:"Release title is required"});
+ let slug=slugify(title),n=2;while(row("SELECT id FROM releases WHERE slug=?",[slug]))slug=`${slugify(title)}-${n++}`;
+ const info=db.prepare("INSERT INTO releases(title,slug,artist,user_id,cover,description,release_date,genre,links,featured,published) VALUES(?,?,?,?,?,?,?,?,?,?,?)").run(title,slug,u.display_name,u.id,String(req.body.cover||""),String(req.body.description||""),String(req.body.release_date||""),String(req.body.genre||""),"{}",0,1);
+ res.json(row("SELECT * FROM releases WHERE id=?",[info.lastInsertRowid]));
+});
+app.post("/api/user/beats",userAuth,(req,res)=>{
+ const u=row("SELECT * FROM users WHERE id=?",[req.session.userId]),title=String(req.body.title||"").trim(),audio=String(req.body.audio_url||"").trim();
+ if(title.length<2)return res.status(400).json({error:"Beat title is required"});
+ if(!audio)return res.status(400).json({error:"Beat audio/file URL is required"});
+ let slug=slugify(title),n=2;while(row("SELECT id FROM beats WHERE slug=?",[slug]))slug=`${slugify(title)}-${n++}`;
+ const info=db.prepare("INSERT INTO beats(title,slug,producer,user_id,audio_url,cover,description,genre,bpm,links,featured,published) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").run(title,slug,u.display_name,u.id,audio,String(req.body.cover||""),String(req.body.description||""),String(req.body.genre||""),String(req.body.bpm||""),"{}",0,1);
+ res.json(row("SELECT * FROM beats WHERE id=?",[info.lastInsertRowid]));
+});
+app.post("/api/user/videos",userAuth,(req,res)=>{
+ const u=row("SELECT * FROM users WHERE id=?",[req.session.userId]),title=String(req.body.title||"").trim(),url=String(req.body.url||"").trim();
+ if(title.length<2)return res.status(400).json({error:"Video title is required"});if(!url)return res.status(400).json({error:"Video URL is required"});
+ const info=db.prepare("INSERT INTO videos(title,artist,user_id,thumbnail,url,description,release_date,featured,published) VALUES(?,?,?,?,?,?,?,?,?)").run(title,u.display_name,u.id,String(req.body.thumbnail||""),url,String(req.body.description||""),String(req.body.release_date||""),0,1);
+ res.json(row("SELECT * FROM videos WHERE id=?",[info.lastInsertRowid]));
+});
+
 const resources={
  artists:["name","slug","image","bio","location","socials","youtube_channel","user_id","featured","published","type"],
  releases:["title","slug","artist","cover","description","release_date","genre","links","featured","published"],
  videos:["title","artist","thumbnail","url","description","release_date","featured","published"],
- awards:["year","ceremony","category","winner","winner_image","description","nominees","featured","published"]
+ awards:["year","ceremony","category","winner","winner_image","description","nominees","featured","published"],
+ beats:["title","slug","producer","audio_url","cover","description","genre","bpm","featured","published"]
 };
 for(const [resource,fields] of Object.entries(resources)){
  app.get(`/api/admin/${resource}`,adminAuth,(req,res)=>res.json(rows(`SELECT * FROM ${resource} ORDER BY id DESC`)));
@@ -355,6 +468,7 @@ app.post("/api/admin/password",adminAuth,(req,res)=>{
  if(!newPassword||newPassword.length<10)return res.status(400).json({error:"Password must be at least 10 characters"});
  db.prepare("UPDATE admins SET password_hash=? WHERE id=?").run(bcrypt.hashSync(newPassword,12),a.id);res.json({ok:true});
 });
+app.post("/api/user/upload",userAuth,upload.single("file"),(req,res)=>{if(!req.file)return res.status(400).json({error:"No file"});res.json({url:"/uploads/"+req.file.filename,name:req.file.originalname});});
 app.post("/api/admin/upload",adminAuth,upload.single("file"),(req,res)=>{
  if(!req.file)return res.status(400).json({error:"No file"});
  res.json({url:"/uploads/"+req.file.filename,name:req.file.originalname});

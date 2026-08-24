@@ -22,3 +22,6 @@ After deployment, point `underground.geo` DNS records to the host's custom-domai
 
 ## Important
 Change the default admin password and session secret before exposing the app publicly.
+
+
+Community features: creators can publish releases, beats and videos. Logged-in users can like and comment on releases and beats. A prominent Underground GEO Discord banner is included.
