@@ -313,9 +313,13 @@ for(const [resource,fields] of Object.entries(resources)){
   if(resource==="artists")body.slug=body.slug||slugify(body.name);
   if(resource==="releases")body.slug=body.slug||slugify(body.title);
   const vals=fields.map(f=>{
+   if(f==="type")return String(body[f]||"artist");
+   if(["featured","published"].includes(f)){
+    const v=body[f];
+    return v===true || v===1 || v==="1" || v==="true" || v==="on" ? 1 : 0;
+   }
    if(["socials","links","nominees"].includes(f)&&typeof body[f]!=="string")return JSON.stringify(body[f]||{});
-   if(f==="type")return body[f]||"artist";
-   return body[f]??(["featured","published"].includes(f)?0:"");
+   return body[f] ?? "";
   });
   try{
    const info=db.prepare(`INSERT INTO ${resource} (${fields.join(",")}) VALUES (${fields.map(()=>"?").join(",")})`).run(...vals);
