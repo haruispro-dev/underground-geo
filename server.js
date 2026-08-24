@@ -161,7 +161,22 @@ const normalizeYoutube=s=>{
  if(v.startsWith("@")) return "https://www.youtube.com/"+v;
  return "https://www.youtube.com/@"+v.replace(/^@/,"");
 };
-const validYoutube=s=>/^https?:\/\/(www\.)?youtube\.com\/(channel\/|c\/|user\/|@)[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]+$/i.test(normalizeYoutube(s));
+const validYoutube=s=>/^https?:\/\/(www\.)?youtube\.com\/(channel\/|c\/|user\/|@)[A-Za-z0-9._~:/?#[\]@!$&\'()*+,;=%-]+$/i.test(normalizeYoutube(s));
+
+async function getYoutubeAvatar(channelUrl){
+ try{
+  const r=await fetch(channelUrl,{headers:{"user-agent":"Mozilla/5.0 (compatible; UndergroundGeo/1.0)"}});
+  if(!r.ok)return "";
+  const html=await r.text();
+  const patterns=[
+   /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+   /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i,
+   /"avatar"\s*:\s*\{\s*"thumbnails"\s*:\s*\[\s*\{[^}]*?"url"\s*:\s*"([^"']+)"/i
+  ];
+  for(const p of patterns){const m=html.match(p);if(m?.[1])return m[1].replace(/\\u0026/g,"&").replace(/\\\//g,"/");}
+ }catch{}
+ return "";
+}
 
 function rows(sql,params=[]){return db.prepare(sql).all(...params)}
 function row(sql,params=[]){return db.prepare(sql).get(...params)}
@@ -181,7 +196,7 @@ app.get("/api/auth/me",(req,res)=>{
  res.status(401).json({authenticated:false});
 });
 
-app.post("/api/register",(req,res)=>{
+app.post("/api/register",async (req,res)=>{
  const displayName=String(req.body.display_name||"").trim();
  const bio=String(req.body.bio||"").trim();
  const email=String(req.body.email||"").trim().toLowerCase();
@@ -200,8 +215,9 @@ app.post("/api/register",(req,res)=>{
   const slug=slugify(displayName);
   let finalSlug=slug, n=2;
   while(row("SELECT id FROM artists WHERE slug=?",[finalSlug])) finalSlug=`${slug}-${n++}`;
-  db.prepare(`INSERT INTO artists(name,slug,bio,location,youtube_channel,user_id,featured,published,type)
-    VALUES(?,?,?,?,?,?,0,1,?)`).run(displayName,finalSlug,bio,"",youtube,info.lastInsertRowid,role);
+  const youtubeImage=await getYoutubeAvatar(youtube);
+  db.prepare(`INSERT INTO artists(name,slug,image,bio,location,youtube_channel,user_id,featured,published,type)
+    VALUES(?,?,?,?,?,?,?,0,1,?)`).run(displayName,finalSlug,youtubeImage,bio,"",youtube,info.lastInsertRowid,role);
   req.session.userId=info.lastInsertRowid; req.session.adminId=null;
   res.json({ok:true,message:"Account created. Your profile is live.",role});
  }catch(e){res.status(500).json({error:"Could not create account"})}
